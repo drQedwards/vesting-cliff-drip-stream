@@ -7,14 +7,26 @@
  * GET  /graphql  → GraphiQL playground (non-production only)
  * POST /graphql  → GraphQL query execution
  *
- * Depth limiting: GRAPHQL_MAX_DEPTH env var (default: 5)
+ * Limits (also declared in backend/src/config.ts):
+ *   GRAPHQL_MAX_DEPTH       default 5
+ *   GRAPHQL_MAX_COMPLEXITY  default 100
  */
 
 const { buildSchema, parse, execute } = require("graphql");
-const { checkDepth } = require("../graphql-depth-limit");
+const {
+  enforceQueryLimits,
+  loadGraphqlLimits,
+  QueryLimitError,
+} = require("../graphql-depth-limit");
 const { StellarSdk, loadConfig } = require("../lib");
 
-const MAX_DEPTH = parseInt(process.env.GRAPHQL_MAX_DEPTH ?? "5", 10);
+function getLogger() {
+  try {
+    return require("../logger").logger;
+  } catch {
+    return console;
+  }
+}
 
 const schema = buildSchema(`
   type VestingSchedule {
@@ -53,7 +65,6 @@ async function fetchSchedule(recipient, config) {
   const val = sim.result.retval;
   if (val.switch().name === "scvVoid") return null;
 
-  // Parse the map returned by get_schedule
   const map = val.value().value();
   const field = (name) => {
     const entry = map.find((e) => e.key().value().toString() === name);
@@ -125,8 +136,26 @@ const GRAPHIQL_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+function rejectQuery(res, err) {
+  const status = err instanceof QueryLimitError ? err.statusCode : 400;
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    errors: [{
+      message: err.message,
+      extensions: err instanceof QueryLimitError
+        ? {
+            code: err.code,
+            depth: err.depth,
+            complexity: err.complexity,
+            maxDepth: Number.isFinite(err.maxDepth) ? err.maxDepth : undefined,
+            maxComplexity: Number.isFinite(err.maxComplexity) ? err.maxComplexity : undefined,
+          }
+        : undefined,
+    }],
+  }));
+}
+
 async function graphqlHandler(req, res) {
-  // GraphiQL playground for GET requests in non-production
   if (req.method === "GET" && process.env.NODE_ENV !== "production") {
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(GRAPHIQL_HTML);
@@ -140,7 +169,13 @@ async function graphqlHandler(req, res) {
   }
 
   let body = "";
-  await new Promise((resolve) => { req.on("data", (c) => { body += c; }); req.on("end", resolve); });
+  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
+    body = JSON.stringify(req.body);
+  } else if (typeof req.body === "string") {
+    body = req.body;
+  } else {
+    await new Promise((resolve) => { req.on("data", (c) => { body += c; }); req.on("end", resolve); });
+  }
 
   let query, variables, operationName;
   try {
@@ -160,11 +195,17 @@ async function graphqlHandler(req, res) {
     return;
   }
 
+  const { maxDepth, maxComplexity } = loadGraphqlLimits();
   try {
-    checkDepth(document, MAX_DEPTH);
+    enforceQueryLimits(document, {
+      maxDepth,
+      maxComplexity,
+      variables: variables ?? {},
+      logger: getLogger(),
+      query,
+    });
   } catch (err) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ errors: [{ message: err.message }] }));
+    rejectQuery(res, err);
     return;
   }
 
