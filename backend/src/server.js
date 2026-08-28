@@ -5,6 +5,7 @@ const { requestIdMiddleware } = require("./middleware/requestId");
 const { challengeHandler, tokenHandler, authMiddleware } = require("./routes/auth");
 const { exportSponsorHandler } = require("./routes/export");
 const { optOutHandler } = require("./routes/optOut");
+const { graphqlHandler } = require("./routes/graphql");
 const { startAdminServer } = require("./admin/server.ts");
 const { scheduleNotificationJob } = require("./jobs/notificationJob.js");
 
@@ -17,6 +18,7 @@ app.post("/auth/token", tokenHandler);
 
 app.get("/export/sponsor/:address", authMiddleware, exportSponsorHandler);
 app.post("/notify/opt-out", authMiddleware, optOutHandler);
+app.all("/graphql", graphqlHandler);
 
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
